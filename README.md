@@ -1,5 +1,9 @@
 # NodeRAG: Structural Intelligence over Relational Databases
 
+> Graph-based RAG system for multi-hop reasoning over relational databases
+
+![NodeRAG Demo](assets/demo.png)
+
 ## Overview
 
 NodeRAG is a graph-based Retrieval-Augmented Generation (RAG) system that transforms a relational
