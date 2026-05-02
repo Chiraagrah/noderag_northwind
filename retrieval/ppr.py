@@ -12,8 +12,8 @@ import config
 
 class ShallowPPR:
     def __init__(self, alpha: float | None = None, max_iter: int | None = None):
-        self.alpha    = alpha    if alpha    is not None else config.PPR_ALPHA
-        self.max_iter = max_iter if max_iter is not None else config.PPR_MAX_ITER
+        self.alpha    = alpha    if alpha    is not None else getattr(config, "PPR_ALPHA",    0.85)
+        self.max_iter = max_iter if max_iter is not None else getattr(config, "PPR_MAX_ITER", 100)
 
     def run(
         self,
@@ -40,17 +40,17 @@ class ShallowPPR:
             weight="weight",
         )
 
-        # collect 2-hop neighbourhood of every seed
-        two_hop: set[str] = set()
+        # collect 3-hop neighbourhood of every seed (deeper FK chains need ≥3 hops)
+        three_hop: set[str] = set()
         for seed in seeds:
-            lengths = nx.single_source_shortest_path_length(G_un, seed, cutoff=2)
-            two_hop.update(lengths.keys())
+            lengths = nx.single_source_shortest_path_length(G_un, seed, cutoff=3)
+            three_hop.update(lengths.keys())
 
-        # filter to 2-hop, sort descending, return top_k
+        # filter to 3-hop; exclude community nodes (structural shortcuts, not informative)
         filtered = [
             (nid, ppr_scores[nid])
-            for nid in two_hop
-            if nid in ppr_scores
+            for nid in three_hop
+            if nid in ppr_scores and not nid.startswith("community_")
         ]
         filtered.sort(key=lambda x: x[1], reverse=True)
         return filtered[:top_k]

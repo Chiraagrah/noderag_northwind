@@ -90,16 +90,49 @@ class IngestionPipeline:
         )
         summary["embeddings"] = {"count": len(embeddings), "dim": dim, "seconds": round(elapsed, 1)}
 
-        # ── Step 5: build and save index ──────────────────────────────────────
-        self._step("5", "Build & save FAISS index")
+        # ── Step 4.5: GNN — train on graph topology, save embeddings separately ─
+        # IMPORTANT: FAISS is built from sentence-transformer embeddings (base_embeddings)
+        # so that query vectors (also sentence-transformer) remain in the same space.
+        # GNN embeddings are saved separately and used for neighbourhood expansion
+        # at retrieval time, replacing the PPR graph-walk step.
+        self._step("4.5", "GNN topology training (GraphSAGE — saved separately)")
+        import numpy as np
+        from pathlib import Path
+        from graph.gnn_embedder import GNNEmbedder
+        t0  = time.time()
+        gnn = GNNEmbedder(
+            hidden_dim = config.GNN_HIDDEN_DIM,
+            out_dim    = config.GNN_OUT_DIM,
+            epochs     = config.GNN_EPOCHS,
+            lr         = config.GNN_LR,
+            neg_ratio  = config.GNN_NEG_RATIO,
+        )
+        gnn_embeddings = gnn.fit_transform(G, embeddings, verbose=True)
+        elapsed = time.time() - t0
+
+        # Save GNN embeddings to a separate .npz file (not the FAISS index)
+        gnn_path = str(Path(self.index_output).parent / "northwind_gnn_embeddings.npz")
+        np.savez_compressed(
+            gnn_path,
+            node_ids=np.array(list(gnn_embeddings.keys())),
+            embeddings=np.stack(list(gnn_embeddings.values())).astype(np.float32),
+        )
+        console.print(
+            f"  [green]OK[/green]  GNN embeddings saved to {gnn_path}  "
+            f"| dim={config.GNN_OUT_DIM} | {elapsed:.1f}s"
+        )
+        summary["gnn"] = {"dim": config.GNN_OUT_DIM, "path": gnn_path, "seconds": round(elapsed, 1)}
+
+        # ── Step 5: build and save FAISS index from sentence-transformer embeddings ─
+        self._step("5", "Build & save FAISS index (sentence-transformer embeddings)")
         from graph.indexer import NodeIndex
         node_data = {
             nid: G.nodes[nid]["data"]
-            for nid in embeddings
+            for nid in embeddings          # <— base sentence-transformer embeddings
             if G.nodes[nid].get("data") is not None
         }
         idx = NodeIndex()
-        idx.build(embeddings, node_data)
+        idx.build(embeddings, node_data)   # <— NOT gnn_embeddings
         idx.save(self.index_output)
         console.print(
             f"  [green]OK[/green]  Saved to {self.index_output}.faiss + .json"

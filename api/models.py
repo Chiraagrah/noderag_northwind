@@ -38,7 +38,7 @@ class SubgraphRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    top_k:    int  = 10
+    top_k:    int  = 25
     verbose:  bool = False
 
 

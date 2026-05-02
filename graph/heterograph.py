@@ -354,6 +354,8 @@ class NorthwindHeterograph:
             ))
             self._add_edge(nid, f"entity_OrderDetails_{r['OrderID']}_{r['ProductID']}", "HAS_SOURCE")
             self._add_edge(nid, f"entity_Orders_{r['OrderID']}",                        "HAS_TARGET")
+            # Wire product→orderdetail so supplier→product→order chain is traversable
+            self._add_edge(nid, f"entity_Products_{r['ProductID']}",                   "INVOLVES_PRODUCT")
 
     def _rel_employees_manager(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("""

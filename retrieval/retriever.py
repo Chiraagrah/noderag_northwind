@@ -1,4 +1,4 @@
-# Unified retrieval pipeline: vector search -> seed nodes -> Shallow PPR -> K-core boost
+# Retrieval pipeline: sentence-transformer FAISS seed → GNN neighbourhood expansion → K-core boost
 from __future__ import annotations
 
 import sys
@@ -43,28 +43,37 @@ _SECTION_ORDER = [
 
 class NodeRAGRetriever:
     """
-    Full NodeRAG retrieval pipeline:
-      1. Embed query
-      2. Vector search  -> seed nodes (N1-N6 only)
-      3. Shallow PPR    -> expanded neighbourhood
-      4. K-core boost   -> re-rank by structural importance
+    NodeRAG retrieval pipeline:
+      1. Embed query (sentence transformer)
+      2. FAISS seed search (sentence-transformer embeddings — same space as query)
+      3. GNN neighbourhood expansion (topology-aware, replaces ShallowPPR)
+         Falls back to PPR if GNN embeddings file is not present.
+      4. K-core boost  ->  re-rank by structural importance
       5. Assemble context window
     """
 
-    def __init__(self, G, index, embedder, ppr, kcore):
-        self.G       = G
-        self.index   = index
+    def __init__(self, G, index, embedder, kcore):
+        self.G        = G
+        self.index    = index
         self.embedder = embedder
-        self.ppr     = ppr
-        self.kcore   = kcore
+        self.kcore    = kcore
+
+        # Load GNN expander if available and non-degenerate, otherwise fall back to PPR
+        from retrieval.gnn_expand import GNNExpander
+        self._gnn = GNNExpander()
+        if self._gnn.is_useful():
+            self._gnn.load()
+            self._use_gnn = True
+        else:
+            self._use_gnn = False
 
     def retrieve(self, query: str, top_k: int | None = None) -> RetrievalResult:
         k = top_k or config.TOP_K_RETRIEVAL
 
-        # 1. embed query
+        # 1. embed query with sentence transformer
         qvec = self.embedder.embed_text(query)
 
-        # 2. vector search — seed from N1-N6 only
+        # 2. FAISS seed search — sentence-transformer space, compatible with query
         seed_hits = self.index.search(qvec, top_k=k, filter_types=_SEED_TYPES)
         seed_ids  = [h["node_id"] for h in seed_hits]
         seed_nodes_out = [
@@ -74,16 +83,45 @@ class NodeRAGRetriever:
             for h in seed_hits
         ]
 
-        # 3. Shallow PPR from seed set
-        ppr_results = self.ppr.run(self.G, seed_ids, top_k=k * 3)
-
-        if not ppr_results:
-            # fallback: use seed nodes directly
-            ppr_results = [(h["node_id"], h["score"]) for h in seed_hits]
+        # 3. Neighbourhood expansion
+        from retrieval.ppr import ShallowPPR
+        ppr = ShallowPPR()
+        # Always run PPR for discriminative ranking; GNN is used for candidate discovery only
+        ppr_scores_map = dict(ppr.run(self.G, seed_ids, top_k=k * 5))
+        if self._use_gnn:
+            # GNN discovers topology-adjacent candidates
+            gnn_candidates = self._gnn.expand(
+                seed_ids,
+                top_k             = k * 3,
+                neighbors_per_seed= config.GNN_NEIGHBORS_PER_SEED,
+                rounds            = 2,
+            )
+            # Score by PPR (discriminative) rather than flat GNN cosine sims
+            expanded = [
+                (nid, ppr_scores_map.get(nid, score * 0.001))
+                for nid, score in gnn_candidates
+            ]
+            if not expanded:
+                expanded = [(h["node_id"], h["score"]) for h in seed_hits]
+        else:
+            expanded = ppr.run(self.G, seed_ids, top_k=k * 3)
+            if not expanded:
+                expanded = [(h["node_id"], h["score"]) for h in seed_hits]
+        # Ensure FAISS seeds appear in the expanded set with their semantic scores.
+        # Semantic summary nodes have high FAISS relevance but low PPR (few edges);
+        # this guarantees they act as high-weight endpoints in augment_with_paths.
+        seed_faiss = {h["node_id"]: h["score"] for h in seed_hits}
+        exp_map = dict(expanded)
+        for nid, faiss_score in seed_faiss.items():
+            if nid not in exp_map or exp_map[nid] < faiss_score:
+                exp_map[nid] = faiss_score
+        expanded = sorted(exp_map.items(), key=lambda x: -x[1])
+        # Bridge-node augmentation with FAISS+PPR scores driving pair scoring
+        expanded = self._gnn.augment_with_paths(self.G, expanded, seed_ids, max_pair_probes=20, max_path_len=8)
 
         # 4. K-core boost
-        core_numbers  = self.kcore.get_core_numbers(self.G)
-        boosted       = self.kcore.boost_scores(ppr_results, core_numbers)[:k]
+        core_numbers = self.kcore.get_core_numbers(self.G)
+        boosted      = self.kcore.boost_scores(expanded, core_numbers)[:k]
 
         # 5. Build retrieved_nodes list
         retrieved_nodes_out: list[dict] = []
@@ -105,10 +143,19 @@ class NodeRAGRetriever:
         context_text = self._assemble_context(node_objs)
 
         # 7. Retrieval path (top 5)
-        retrieval_path = [
-            self.ppr.explain(self.G, nid, seed_ids)
-            for nid, _ in boosted[:5]
-        ]
+        retrieval_path = []
+        method = "GNN" if self._use_gnn else "PPR"
+        for rank, (nid, score) in enumerate(boosted[:5], 1):
+            nd    = self.G.nodes[nid].get("data") if nid in self.G else None
+            ntype = nd.node_type if nd else "?"
+            kval  = core_numbers.get(nid, 0)
+            if self._use_gnn:
+                detail = self._gnn.explain(nid, seed_ids)
+            else:
+                detail = f"[PPR] {nid}"
+            retrieval_path.append(
+                f"#{rank} [{ntype}] score={score:.4f} k-core={kval}  {detail}"
+            )
 
         return RetrievalResult(
             query=query,
@@ -162,7 +209,6 @@ if __name__ == "__main__":
     from graph.embedder import NodeEmbedder
     from graph.indexer import NodeIndex
     from graph.node_types import node_from_dict
-    from retrieval.ppr import ShallowPPR
     from retrieval.kcore import KCoreRanker
 
     console = Console()
@@ -186,9 +232,8 @@ if __name__ == "__main__":
 
     # ── build pipeline ────────────────────────────────────────────────────────
     embedder  = NodeEmbedder()
-    ppr       = ShallowPPR()
     kcore     = KCoreRanker()
-    retriever = NodeRAGRetriever(G, index, embedder, ppr, kcore)
+    retriever = NodeRAGRetriever(G, index, embedder, kcore)
 
     # ── three sample queries ──────────────────────────────────────────────────
     queries = [
@@ -217,7 +262,7 @@ if __name__ == "__main__":
         console.print(seed_tbl)
 
         # retrieved nodes table
-        ret_tbl = Table(title="Retrieved Nodes (PPR + K-core boosted)", show_lines=True)
+        ret_tbl = Table(title="Retrieved Nodes (GNN + K-core boosted)", show_lines=True)
         ret_tbl.add_column("rank",       justify="right", style="dim")
         ret_tbl.add_column("node_type",  style="cyan",    no_wrap=True)
         ret_tbl.add_column("score",      justify="right", style="green")

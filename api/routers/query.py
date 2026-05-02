@@ -1,4 +1,4 @@
-"""Query endpoint — SSE stream of retrieval pipeline events."""
+"""Query endpoint — SSE stream of retrieval pipeline events (GNN-based)."""
 from __future__ import annotations
 
 import asyncio
@@ -59,7 +59,7 @@ async def run_query(req: QueryRequest):
             yield _sse("seed", {"status": "embedding", "question": req.question})
             await asyncio.sleep(0.3)
 
-            # 2. Embed + vector search
+            # 2. Embed + FAISS seed search (sentence-transformer space, query-compatible)
             qvec      = embedder.embed_text(req.question)
             seed_hits = index.search(qvec, top_k=k, filter_types=_SEED_TYPES)
             seed_ids  = [h["node_id"] for h in seed_hits]
@@ -67,24 +67,58 @@ async def run_query(req: QueryRequest):
             yield _sse("seed", {"nodes": seed_dtos})
             await asyncio.sleep(0.3)
 
-            # 3. Shallow PPR
+            # 3. GNN neighbourhood expansion (topology-aware; falls back to PPR)
+            from retrieval.gnn_expand import GNNExpander
             from retrieval.ppr import ShallowPPR
-            ppr         = ShallowPPR()
-            ppr_results = ppr.run(G, seed_ids, top_k=k * 3)
-            if not ppr_results:
-                ppr_results = [(h["node_id"], h["score"]) for h in seed_hits]
-            ppr_scores  = {nid: score for nid, score in ppr_results}
-            ppr_dtos    = [_node_to_dto_dict(nid, G) for nid, _ in ppr_results[:10]]
-            yield _sse("ppr", {"nodes": ppr_dtos, "scores": ppr_scores})
+            import config as _cfg
+            gnn_exp = GNNExpander()
+            ppr     = ShallowPPR()
+            # Always run PPR for discriminative ranking scores
+            ppr_scores_map = dict(ppr.run(G, seed_ids, top_k=k * 5))
+            if gnn_exp.is_useful():
+                # GNN discovers topology-adjacent candidate nodes
+                gnn_exp.load()
+                gnn_candidates = gnn_exp.expand(
+                    seed_ids,
+                    top_k             = k * 3,
+                    neighbors_per_seed= _cfg.GNN_NEIGHBORS_PER_SEED,
+                    rounds            = 2,
+                )
+                # Score by PPR (discriminative) rather than flat GNN cosine sims
+                expanded = [
+                    (nid, ppr_scores_map.get(nid, score * 0.001))
+                    for nid, score in gnn_candidates
+                ]
+                if not expanded:
+                    expanded = [(h["node_id"], h["score"]) for h in seed_hits]
+            else:
+                expanded = ppr.run(G, seed_ids, top_k=k * 3)
+                if not expanded:
+                    expanded = [(h["node_id"], h["score"]) for h in seed_hits]
+            # Ensure FAISS seeds are in the expanded set with their semantic scores.
+            # Semantic summary nodes (su_*) have high FAISS relevance but low PPR due
+            # to few edges; preserving their FAISS scores makes augment_with_paths use
+            # them as high-weight endpoints for bridge-node pair scoring.
+            seed_faiss = {h["node_id"]: h["score"] for h in seed_hits}
+            exp_map = dict(expanded)
+            for nid, faiss_score in seed_faiss.items():
+                if nid not in exp_map or exp_map[nid] < faiss_score:
+                    exp_map[nid] = faiss_score
+            expanded = sorted(exp_map.items(), key=lambda x: -x[1])
+            # Bridge-node augmentation with FAISS+PPR scores driving pair scoring
+            expanded   = gnn_exp.augment_with_paths(G, expanded, seed_ids, max_pair_probes=20, max_path_len=8)
+            exp_scores = {nid: score for nid, score in expanded}
+            exp_dtos   = [_node_to_dto_dict(nid, G) for nid, _ in expanded[:10]]
+            yield _sse("ppr", {"nodes": exp_dtos, "scores": exp_scores})
             await asyncio.sleep(0.3)
 
             # 4. K-core boost
             from retrieval.kcore import KCoreRanker
             kcore        = KCoreRanker()
             core_numbers = kcore.get_core_numbers(G)
-            boosted      = kcore.boost_scores(ppr_results, core_numbers)[:k]
+            boosted      = kcore.boost_scores(expanded, core_numbers)[:k]
             boosts       = {
-                nid: round(bs - ppr_scores.get(nid, bs), 6)
+                nid: round(bs - exp_scores.get(nid, bs), 6)
                 for nid, bs in boosted
             }
             kcore_dtos = [_node_to_dto_dict(nid, G) for nid, _ in boosted]
@@ -98,7 +132,7 @@ async def run_query(req: QueryRequest):
                 for nid, _ in boosted
                 if nid in G and G.nodes[nid].get("data")
             ]
-            retriever    = NodeRAGRetriever(G, index, embedder, ppr, kcore)
+            retriever    = NodeRAGRetriever(G, index, embedder, kcore)
             context_text = retriever._assemble_context(node_objs)
             node_ids     = [nid for nid, _ in boosted]
             yield _sse("context", {
@@ -112,8 +146,9 @@ async def run_query(req: QueryRequest):
             from llm.answerer import NodeRAGAnswerer
             answerer       = NodeRAGAnswerer()
             retrieval_path = [
-                ppr.explain(G, nid, seed_ids)
-                for nid, _ in boosted[:5]
+                f"#{i+1} [{G.nodes[nid].get('data').node_type if nid in G and G.nodes[nid].get('data') else '?'}] "
+                f"{nid}  score={score:.4f}  k-core={core_numbers.get(nid, 0)}"
+                for i, (nid, score) in enumerate(boosted[:5])
             ]
 
             loop   = asyncio.get_event_loop()

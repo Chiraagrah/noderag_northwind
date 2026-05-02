@@ -100,39 +100,95 @@ Northwind SQLite DB
 
 ---
 
-## Quickstart
+## Running NodeRAG (from source)
+
+NodeRAG is distributed as source code only — there is no pre-built binary. Two
+runtime modes are supported: a CLI for terminal use, and a full-stack web app
+(FastAPI backend + React/D3 frontend).
+
+### Prerequisites
+
+| Dependency | Version | Used for |
+|---|---|---|
+| Python | 3.10 + | backend, retrieval, LLM client |
+| Node.js | 18 + | frontend dev server / build |
+| Anthropic API key | n/a | LLM answer generation |
+
+### 1. Install
 
 ```bash
-# 1. Clone / copy the project and enter the directory
+git clone https://github.com/Chiraagrah/noderag_northwind
 cd noderag_northwind
 
-# 2. Create and activate a virtual environment (recommended)
+# Python
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS/Linux
-
-# 3. Install all dependencies
+.venv\Scripts\activate            # Windows
+# source .venv/bin/activate       # macOS / Linux
 pip install -e .
 
-# 4. Configure environment
-cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY=sk-ant-...
-
-# 5. Bootstrap the Northwind database
-python data/bootstrap_northwind.py
-
-# 6. Build the knowledge graph and FAISS index (~2 min, embedding-dominated)
-noderag ingest
-
-# 7. Ask a question
-noderag ask "Which suppliers from the UK supply Beverages products?"
-
-# 8. Start the interactive REPL
-noderag interactive
-
-# 9. Optional: rebuild graph with LLM-enriched node descriptions
-noderag ingest --enrich
+# Frontend (only if you plan to use the web app)
+cd frontend && npm install && cd ..
 ```
+
+Or, in one shot via `make`:
+
+```bash
+make install
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+# edit .env, set:
+#   ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### 3. Build the knowledge graph and FAISS index (≈ 2 min)
+
+```bash
+python data/bootstrap_northwind.py     # downloads / generates Northwind SQLite
+noderag ingest                          # graph + embeddings + FAISS index
+# or:  make ingest
+```
+
+### 4. Run
+
+**Option A — Web application (recommended)**
+
+```bash
+make dev
+```
+
+Opens two dev servers and forwards them through Vite:
+
+- API on `http://localhost:8000`
+- Frontend on `http://localhost:5173`  ← open this in your browser
+
+For a single-process production-style run:
+
+```bash
+make build                                              # builds frontend into api/static/
+uvicorn api.main:app --host 0.0.0.0 --port 8000        # one server on :8000
+```
+
+**Option B — CLI**
+
+```bash
+noderag ask "Which suppliers from the UK supply Beverages products?"
+noderag interactive            # REPL
+noderag ingest --enrich        # rebuild with LLM-enriched node descriptions
+```
+
+**Option C — Convenience launcher (Windows-friendly)**
+
+```bash
+python launcher.py
+```
+
+Spawns the API on :8000, the frontend on :5173, waits for the API to be ready,
+then opens the browser automatically. Equivalent to `make dev` plus the browser
+open step.
 
 ---
 
@@ -292,24 +348,7 @@ noderag_northwind/
 
 A full-stack web application that exposes the NodeRAG pipeline as a visual knowledge-graph explorer
 and natural-language query interface. Stack: React 18 + Vite · D3.js v7 · FastAPI · Tailwind CSS ·
-Framer Motion.
-
-### Quick Start
-
-```bash
-make install   # install Python and Node dependencies
-make ingest    # build the graph and vector index (2-3 min on first run)
-make dev       # start API on :8000 and frontend on :5173
-```
-
-Open `http://localhost:5173` in the browser.
-
-Production build (single server on port 8000):
-
-```bash
-make build     # compiles React into api/static/
-uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
+Framer Motion. See *Running NodeRAG* above for installation and run commands.
 
 ### Features
 

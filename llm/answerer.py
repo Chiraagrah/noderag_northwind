@@ -26,7 +26,28 @@ Answer the user's question by:
 4. Citing the specific pieces of context you relied on
 
 Always reason step by step before giving your final answer.
-If the context doesn't contain enough information, say so clearly.\
+
+NEGATIVE EVIDENCE — VERY IMPORTANT
+----------------------------------
+The retrieval pipeline pulls in the entities, relationships, and bridge nodes \
+relevant to the question. If the context contains the candidate entities on \
+both sides of a relation but NO connecting relationship/order/orderdetail \
+node links them, that is itself the answer: the relation does not exist in \
+the data.
+
+Do NOT default to "I don't have enough information" when the context shows \
+the relevant entity sets but no link between them. Instead, commit to a \
+negative answer: "Based on the retrieved data, no <X> serves any <Y>" or \
+"There is no <X>--<Y> relationship in the database."
+
+Reserve "low confidence / not enough information" for cases where the \
+retrieved context is genuinely sparse on the entities themselves (e.g. you \
+were asked about a country and no nodes for that country appear at all).
+
+Confidence guide:
+- "high"   = direct evidence in the context supports the answer (positive or negative)
+- "medium" = answer is inferable but some links are circumstantial
+- "low"    = the relevant entities themselves are missing from context\
 """
 
 

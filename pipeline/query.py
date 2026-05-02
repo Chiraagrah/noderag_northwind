@@ -39,7 +39,6 @@ class QueryPipeline:
         from graph.node_types import node_from_dict
         from llm.answerer import NodeRAGAnswerer
         from retrieval.kcore import KCoreRanker
-        from retrieval.ppr import ShallowPPR
         from retrieval.retriever import NodeRAGRetriever
 
         # graph
@@ -63,10 +62,9 @@ class QueryPipeline:
 
         # build pipeline components
         embedder  = NodeEmbedder()
-        ppr       = ShallowPPR()
         kcore     = KCoreRanker()
 
-        self._retriever = NodeRAGRetriever(G, index, embedder, ppr, kcore)
+        self._retriever = NodeRAGRetriever(G, index, embedder, kcore)
         self._answerer  = NodeRAGAnswerer()
         console.print("[green]Pipeline ready.[/green]")
 
@@ -149,7 +147,7 @@ class QueryPipeline:
             seed_tbl.add_row(s["node_id"][:45], s["node_type"], f"{s['score']:.4f}")
         console.print(seed_tbl)
 
-        ret_tbl = Table(title="Retrieved Nodes (PPR + K-core)", show_lines=True)
+        ret_tbl = Table(title="Retrieved Nodes (GNN + K-core)", show_lines=True)
         ret_tbl.add_column("rank",       justify="right", style="dim")
         ret_tbl.add_column("node_type",  style="cyan",    no_wrap=True)
         ret_tbl.add_column("score",      justify="right", style="green")

@@ -8,6 +8,9 @@ __pycache__/
 .eggs/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Data / DB
 data/
@@ -16,6 +19,24 @@ data/
 # Node
 node_modules/
 
-# OS
+# Frontend build output
+frontend/dist/
+
+# Logs / runtime
+logs/
+*.log
+
+# PyInstaller artefacts
+*.exe
+*.spec
+
+# Report and presentation outputs (regenerated, not source)
+*.pdf
+*.pptx
+
+# Editor / OS
 .DS_Store
 Thumbs.db
+~$*
+.idea/
+.vscode/
